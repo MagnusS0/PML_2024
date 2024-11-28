@@ -177,3 +177,19 @@ if __name__ == "__main__":
         labels = torch.cat(labels)
         visualize_latent_space(encoded_data.cpu(), labels.cpu(),
                                'results/latent_space_' + str(epoch) + '.png')
+    
+    k = 16
+    u = torch.linspace(0.01, 0.99, k)
+    uu, vv = torch.meshgrid(u, u, indexing='ij')
+
+    # inverse CDF (icdf)
+    standard_normal = torch.distributions.normal.Normal(0, 1)
+    z1 = standard_normal.icdf(uu)
+    z2 = standard_normal.icdf(vv)
+    z_grid = torch.stack([z1, z2], dim=-1).view(-1, 2).to('cuda')
+
+    with torch.no_grad():
+        decoded_samples = model.decode(z_grid)
+        decoded_samples = decoded_samples.view(k * k, 1, 28, 28) 
+    save_image(decoded_samples, 'results/latent_space_grid.png', nrow=k)
+                
