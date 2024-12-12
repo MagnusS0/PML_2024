@@ -13,6 +13,8 @@ pandas = "^2.2.3"
 torch = "^2.5.1"
 torchvision = "^0.20.1"
 matplotlib = "^3.9.2"
+pyro-ppl = "^1.9.1"
+seaborn = "^0.13.2"
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.1.1"
