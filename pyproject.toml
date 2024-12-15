@@ -15,6 +15,7 @@ torchvision = "^0.20.1"
 matplotlib = "^3.9.2"
 pyro-ppl = "^1.9.1"
 seaborn = "^0.13.2"
+arviz = "^0.20.0"
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.1.1"
