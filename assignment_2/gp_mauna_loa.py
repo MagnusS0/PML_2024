@@ -5,6 +5,8 @@ import scipy.spatial
 import scipy.optimize as opt
 
 def gaussian_kernel(X,Xprime, gamma=2):
+    X = X.reshape(-1, 1)
+    Xprime = Xprime.reshape(-1, 1)
     dists = scipy.spatial.distance.cdist(X,Xprime,metric='sqeuclidean')
     return np.exp(-gamma*dists)
 
@@ -35,6 +37,8 @@ y = (y_raw-y_mean)/y_std
 #the next 5 years for prediction
 X_predict = data[120:180,2]-1958
 y_predict = data[120:180,3]
+
+SPECIAL = True
 
 # B) todo: implement this
 def negLogLikelihood(params, kernel):
@@ -69,16 +73,18 @@ def conditional(X, y, noise_var, eta, kernel):
 
     return mu, Sigma
 
-# C) todo: adapt this
-kernel = special_kernel
-# todo: change to the new parameters
-ranges = (slice(0.01, 0.1, 0.01), slice(0, 1, 0.1), slice(0, 1, 0.1))
-
+# Replace the kernel selection section with:
+if SPECIAL:
+    kernel = special_kernel
+    ranges = (slice(0.01, 0.1, 0.01), slice(0, 1, 0.1), slice(0, 1, 0.1))
+else:
+    kernel = gaussian_kernel
+    ranges = ((1.e-4,10), (1.e-4,10))  # noise_var and gamma
 
 Ngrid = 10
 noise_var, eta = optimize_params(ranges, kernel, Ngrid)
 print("optimal params:", noise_var, eta)
-print(eta.shape)
+print(eta.shape if SPECIAL else len(eta))
 
 # B) todo: use the learned GP to predict on the observations at X_predict
 prediction_mean_gp, Sigma_gp = conditional(X, y, noise_var, eta, kernel)
@@ -97,4 +103,4 @@ plt.xlabel("year")
 plt.ylabel("co2(ppm)")
 plt.legend()
 plt.tight_layout()
-plt.show()
+plt.savefig("gp_mauna_loa.png")
