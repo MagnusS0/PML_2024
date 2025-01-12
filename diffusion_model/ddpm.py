@@ -31,7 +31,9 @@ class DDPM(nn.Module):
 
         # Normalize time input before evaluating neural network
         self._network = network
-        self.network = lambda x, t: (self._network(x, t/T))
+        self.network = lambda x, t: (self._network(x.reshape(-1, 1, 28, 28), 
+                                                   (t.squeeze()/T))
+                                    ).reshape(-1, 28*28)
 
         # Total number of time steps
         self.T = T
