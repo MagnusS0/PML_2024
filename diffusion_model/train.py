@@ -1,5 +1,7 @@
 import torch
+from torch.amp import autocast, GradScaler
 from torchvision import datasets, transforms, utils
+from torchmetrics.image.fid import FrechetInceptionDistance
 from tqdm.auto import tqdm
 import matplotlib
 matplotlib.use('Agg') 
@@ -7,6 +9,8 @@ import matplotlib.pyplot as plt
 import math
 from unet import Unet
 from ddpm import DDPM
+
+scaler = GradScaler()
 
 def train(model, optimizer, scheduler, dataloader, epochs, device, per_epoch_callback=None):
     """
@@ -43,9 +47,12 @@ def train(model, optimizer, scheduler, dataloader, epochs, device, per_epoch_cal
             #x, _ = data
             x = x.to(device)
             optimizer.zero_grad()
-            loss = model.loss(x)
-            loss.backward()
-            optimizer.step()
+            with autocast(device_type=device.type):
+                loss = model.loss(x)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        
             scheduler.step()
 
             # Update progress bar
@@ -58,7 +65,7 @@ def train(model, optimizer, scheduler, dataloader, epochs, device, per_epoch_cal
 
 
 # Parameters
-T = 200
+T = 1000
 learning_rate = 1e-3
 epochs = 100
 batch_size = 256
@@ -77,6 +84,8 @@ transform = transforms.Compose([
 # Download and transform train dataset
 dataloader_train = torch.utils.data.DataLoader(datasets.MNIST('./data/mnist_data', download=True, train=True, transform=transform),
                                                 batch_size=batch_size,
+                                                num_workers=8,
+                                                pin_memory=True,
                                                 shuffle=True)
 
 # Select device
@@ -86,7 +95,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 mnist_unet = Unet()
 
 # Construct model
-model = DDPM(mnist_unet, T=T).to(device)
+model = DDPM(mnist_unet, T=T, beta_schedule="linear" ,loss_type="LDS").to(device)
 
 # Construct optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -115,7 +124,49 @@ def reporter(model, epoch):
         plt.savefig(f"sample_{epoch}.png")
         plt.close()
 
+def calculate_fid(model, dataloader, device, num_samples=128):
+    """Calculate FID score between real and generated images."""
+    # Initialize FID metric
+    fid = FrechetInceptionDistance(normalize=True).to(device)
+    
+    # Define transformation for resizing
+    transform = transforms.Compose([
+        transforms.Resize((299, 299)),  # Resize to 299x299 pixels
+    ])
+    
+    # Generate fake images
+    model.eval()
+    with torch.no_grad():
+        fake_samples = []
+        for _ in tqdm(range(math.ceil(num_samples / 128)), desc="Generating fake samples"):
+            samples = model.sample((128, 28 * 28))
+            samples = samples.view(-1, 1, 28, 28)  # Reshape to (N, 1, 28, 28)
+            samples = (samples + 1) / 2 # Map from [-1, 1] to [0, 1]
+            samples = samples.repeat(1, 3, 1, 1)  
+            samples = transform(samples)  # Resize to (N, 3, 299, 299)
+            fake_samples.append(samples)
+        fake_samples = torch.cat(fake_samples)[:num_samples]
+        fid.update(fake_samples.to(device), real=False)
+
+    # Process real images
+    for real_images, _ in dataloader:
+        if fid.real_features_num_samples >= num_samples:
+            break
+        real_images = real_images.view(-1, 1, 28, 28)  
+        real_images = (real_images + 1) / 2  
+        real_images = real_images.repeat(1, 3, 1, 1)  # Repeat channels to get (N, 3, 28, 28)
+        real_images = transform(real_images) # Resize to (N, 3, 299, 299)
+        fid.update(real_images.to(device), real=True)
+
+    # Compute FID
+    return float(fid.compute())
+
 if __name__ == "__main__":
     # Call training loop
     train(model, optimizer, scheduler, dataloader_train,
         epochs=epochs, device=device, per_epoch_callback=reporter)
+    
+    # Calculate FID score after training
+    print("Calculating FID score...")
+    fid_score = calculate_fid(model, dataloader_train, device)
+    print(f"Final FID score: {fid_score:.2f}")

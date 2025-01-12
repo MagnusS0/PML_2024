@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import math
+from loss import elbo_simple, elbo_LDS, elbo_LDS_2
 
 class DDPM(nn.Module):
 
-    def __init__(self, network, T=100, beta_1=1e-4, beta_T=2e-2):
+    def __init__(self, network, T=100, beta_1=1e-4, beta_T=2e-2, beta_schedule='cosine', loss_type='simple'):
         """
         Initialize Denoising Diffusion Probabilistic Model
 
@@ -18,9 +19,15 @@ class DDPM(nn.Module):
             beta_t value at t=T (last step)
         T: int
             The number of diffusion steps.
+        beta_schedule: str
+            The schedule for beta. Options: 'cosine', 'linear'
+        loss_type: str
+            The type of loss to use. Options: 'simple', 'constrained'
         """
 
         super(DDPM, self).__init__()
+
+        self.loss_type = loss_type
 
         # Normalize time input before evaluating neural network
         self._network = network
@@ -30,8 +37,12 @@ class DDPM(nn.Module):
         self.T = T
 
         # Registering as buffers to ensure they get transferred to the GPU automatically
-        #self.register_buffer("beta", torch.linspace(beta_1, beta_T, T+1))
-        self.register_buffer("beta", self.cosine_variance_schedule(T))
+        if beta_schedule == 'cosine':
+            self.register_buffer("beta", self.cosine_variance_schedule(T+1))
+        elif beta_schedule == 'linear':
+            self.register_buffer("beta", torch.linspace(beta_1, beta_T, T+1))
+        else:
+            raise ValueError(f"Unknown beta_schedule: {beta_schedule}")
         self.register_buffer("alpha", 1-self.beta)
         self.register_buffer("alpha_bar", self.alpha.cumprod(dim=0))
 
@@ -149,40 +160,18 @@ class DDPM(nn.Module):
             noise = torch.randn_like(xT) if t > 1 else 0
             t = torch.tensor(t).expand(xt.shape[0], 1).to(self.beta.device)
             xt = self.reverse_diffusion_constrained(xt, t, noise)
-            print(min(xt[0].flatten()), max(xt[0].flatten()))
 
         return xt
-
-
-    def elbo_simple(self, x0):
-        """
-        ELBO training objective (Algorithm 1 in Ho et al, 2020)
-
-        Parameters
-        ----------
-        x0: torch.tensor
-            Input image
-
-        Returns
-        -------
-        float
-            ELBO value
-        """
-
-        # Sample time step t
-        t = torch.randint(1, self.T, (x0.shape[0],1)).to(x0.device)
-
-        # Sample noise
-        epsilon = torch.randn_like(x0)
-
-        # TODO: Forward diffusion to produce image at step t
-        xt = self.forward_diffusion(x0, t, epsilon)
-
-        return -nn.MSELoss(reduction='mean')(epsilon, self.network(xt, t))
-
-
+    
     def loss(self, x0):
         """
         Loss function. Just the negative of the ELBO.
         """
-        return -self.elbo_simple(x0).mean()
+        if self.loss_type == 'simple':
+            return -elbo_simple(self, x0).mean()
+        if self.loss_type == 'LDS':
+            return -elbo_LDS(self, x0).mean()
+        if self.loss_type == 'LDS_2':
+            return -elbo_LDS_2(self, x0).mean()
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
