@@ -228,3 +228,5 @@ pyrightconfig.json
 *.tar
 *.zip
 *ubyte
+events*
+*.pt
