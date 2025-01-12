@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-from loss import elbo_simple, elbo_LDS, elbo_LDS_2
+from loss import elbo_simple, elbo_LDS, elbo_LDS_2, elbo_IS, elbo_simple_pred_x0
 
 class DDPM(nn.Module):
 
@@ -28,6 +28,7 @@ class DDPM(nn.Module):
         super(DDPM, self).__init__()
 
         self.loss_type = loss_type
+        self.loss_squared_history = {t: [] for t in range(T)}
 
         # Normalize time input before evaluating neural network
         self._network = network
@@ -175,5 +176,9 @@ class DDPM(nn.Module):
             return -elbo_LDS(self, x0).mean()
         if self.loss_type == 'LDS_2':
             return -elbo_LDS_2(self, x0).mean()
+        if self.loss_type == 'IS':
+            return -elbo_IS(self, x0).mean()
+        if self.loss_type == 'simple_pred_x0':
+            return -elbo_simple_pred_x0(self, x0).mean()
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")

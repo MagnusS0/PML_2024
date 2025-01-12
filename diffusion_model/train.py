@@ -2,6 +2,10 @@ import torch
 from torch.amp import autocast, GradScaler
 from torchvision import datasets, transforms, utils
 from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.inception import InceptionScore
+from torchvision.models import inception_v3
+from torch.nn.functional import softmax
+import numpy as np
 from tqdm.auto import tqdm
 import matplotlib
 matplotlib.use('Agg') 
@@ -10,8 +14,17 @@ import math
 from unet import ScoreNet
 from ddpm import DDPM
 from ema import ExponentialMovingAverage
+from torch.utils.tensorboard import SummaryWriter
+import os
+from datetime import datetime
 
 scaler = GradScaler()
+
+# Create directories for logs and checkpoints
+log_dir = os.path.join('logs', datetime.now().strftime('%Y%m%d_%H%M%S'))
+checkpoint_dir = 'checkpoints'
+os.makedirs(log_dir, exist_ok=True)
+os.makedirs(checkpoint_dir, exist_ok=True)
 
 def train(model, optimizer, scheduler, dataloader, epochs, device, ema=True, per_epoch_callback=None):
     """
@@ -37,6 +50,9 @@ def train(model, optimizer, scheduler, dataloader, epochs, device, ema=True, per
         Called at the end of every epoch
     """
 
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir)
+
     # Setup progress bar
     total_steps = len(dataloader)*epochs
     progress_bar = tqdm(range(total_steps), desc="Training")
@@ -55,6 +71,7 @@ def train(model, optimizer, scheduler, dataloader, epochs, device, ema=True, per
         model.train()
 
         global_step_counter = 0
+        epoch_loss = 0.0
         for i, (x, _) in enumerate(dataloader):
             x = x.to(device)
             optimizer.zero_grad()
@@ -65,6 +82,13 @@ def train(model, optimizer, scheduler, dataloader, epochs, device, ema=True, per
             scaler.update()
             scheduler.step()
 
+            epoch_loss += loss.item()
+
+            # Log training metrics
+            global_step = epoch * len(dataloader) + i
+            writer.add_scalar('Training/Loss', loss.item(), global_step)
+            writer.add_scalar('Training/Learning_Rate', scheduler.get_last_lr()[0], global_step)
+
             # Update progress bar
             progress_bar.set_postfix(loss=f"⠀{loss.item():12.4f}", epoch=f"{epoch+1}/{epochs}", lr=f"{scheduler.get_last_lr()[0]:.2E}")
             progress_bar.update()
@@ -74,8 +98,14 @@ def train(model, optimizer, scheduler, dataloader, epochs, device, ema=True, per
                 if ema_global_step_counter%ema_steps==0:
                     ema_model.update_parameters(model)                
         
+        # Log average epoch loss
+        writer.add_scalar('Training/Epoch_Loss', epoch_loss / len(dataloader), epoch)
+
         if per_epoch_callback:
-            per_epoch_callback(ema_model.module if ema else model)
+            per_epoch_callback(ema_model.module if ema else model, epoch, writer)
+
+    writer.close()
+    return writer  # Return writer for final metrics logging
 
 
 # Parameters
@@ -113,7 +143,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 mnist_unet = ScoreNet((lambda t: torch.ones(1).to(device)))
 
 # Construct model
-model = DDPM(mnist_unet, T=T).to(device)
+model = DDPM(mnist_unet, T=T, beta_schedule="cosine", loss_type="IS").to(device)
 
 # Construct optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -122,7 +152,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.9999)
 
 
-def reporter(model):
+def reporter(model, epoch, writer):
     """Callback function used for plotting images during training"""
     
     # Switch to eval mode
@@ -136,16 +166,66 @@ def reporter(model):
         samples = (samples+1)/2 
         samples = samples.clamp(0.0, 1.0)
 
-        # Plot in grid
+        # Log images to TensorBoard
         grid = utils.make_grid(samples.reshape(-1, 1, 28, 28), nrow=nsamples)
+        writer.add_image('Generated_Samples', grid, epoch)
+
+        # Plot in grid
         plt.gca().set_axis_off()
         plt.imshow(transforms.functional.to_pil_image(grid), cmap="gray")
+        plt.savefig(f"sample_{epoch}.png")
         plt.close()
 
-def calculate_fid(model, dataloader, device, num_samples=128):
+def calculate_inception_score(model, dataloader, device, num_samples=128, splits=10):
+    """
+    Calculate the Inception Score (IS) for generated images.
+    """
+    # Load InceptionV3 model
+    inception_model = inception_v3(pretrained=True, transform_input=False)
+    inception_model.fc = torch.nn.Identity()  # Remove classification head
+    inception_model = inception_model.to(device).eval()
+
+    # Define transformation for resizing and normalization
+    transform = transforms.Compose([
+        transforms.Resize((299, 299)),  # Resize to 299x299 for InceptionV3
+        transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Convert to 3 channels
+    ])
+
+    # Generate fake images
+    model.eval()
+    with torch.no_grad():
+        fake_samples = []
+        for _ in tqdm(range(math.ceil(num_samples / 128)), desc="Generating fake samples"):
+            samples = model.sample((128, 28 * 28))  # Generate fake samples
+            samples = samples.view(-1, 1, 28, 28)  # Reshape to (N, 1, 28, 28)
+            samples = (samples + 1) / 2  # Map from [-1, 1] to [0, 1]
+            samples = torch.stack([transform(img) for img in samples])  # Resize and convert to 3 channels
+            fake_samples.append(samples)
+        fake_samples = torch.cat(fake_samples)[:num_samples].to(device)
+
+    # Extract features from generated images
+    with torch.no_grad():
+        features = inception_model(fake_samples).cpu().numpy()
+
+    # Calculate probabilities using softmax
+    probabilities = softmax(torch.tensor(features), dim=1).numpy()
+
+    # Split data and calculate Inception Score
+    split_scores = []
+    N = probabilities.shape[0]
+    for k in range(splits):
+        part = probabilities[k * (N // splits):(k + 1) * (N // splits), :]
+        p_y = np.mean(part, axis=0)  # Mean probabilities
+        split_scores.append(np.exp(np.mean(np.sum(part * np.log(part / p_y), axis=1))))
+
+    # Return mean and standard deviation of Inception Score
+    return float(np.mean(split_scores)), float(np.std(split_scores))
+
+def calculate_fid_and_is(model, dataloader, device, num_samples=512):
     """Calculate FID score between real and generated images."""
     # Initialize FID metric
     fid = FrechetInceptionDistance(normalize=True).to(device)
+    is_score = InceptionScore(normalize=True).to(device)
     
     # Define transformation for resizing
     transform = transforms.Compose([
@@ -165,6 +245,7 @@ def calculate_fid(model, dataloader, device, num_samples=128):
             fake_samples.append(samples)
         fake_samples = torch.cat(fake_samples)[:num_samples]
         fid.update(fake_samples.to(device), real=False)
+        is_score.update(fake_samples.to(device))
 
     # Process real images
     for real_images, _ in dataloader:
@@ -177,14 +258,42 @@ def calculate_fid(model, dataloader, device, num_samples=128):
         fid.update(real_images.to(device), real=True)
 
     # Compute FID
-    return float(fid.compute())
+    fid_score = fid.compute()
+    is_score = is_score.compute()
+    return float(fid_score), is_score
 
 if __name__ == "__main__":
     # Call training loop
-    train(model, optimizer, scheduler, dataloader_train,
+    writer = train(model, optimizer, scheduler, dataloader_train,
         epochs=epochs, device=device, per_epoch_callback=reporter)
     
-    # Calculate FID score after training
-    print("Calculating FID score...")
-    fid_score = calculate_fid(model, dataloader_train, device)
+    # Calculate and log final metrics
+    print("Calculating final metrics...")
+    fid_score, is_score = calculate_fid_and_is(model, dataloader_train, device)
+    is_mean, is_std = calculate_inception_score(model, dataloader_train, device, num_samples=1024, splits=10)
+    
+    # Log final metrics to TensorBoard
+    writer.add_hparams(
+        {'learning_rate': learning_rate, 'epochs': epochs, 'batch_size': batch_size},
+        {
+            'FID': fid_score,
+            'IS_mean': is_mean,
+            'IS_std': is_std,
+            'IS_score': is_score[0]  # Assuming is_score returns a tuple
+        }
+    )
+    
+    # Save final model
+    checkpoint_path = os.path.join(checkpoint_dir, f'model_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'epoch': epochs,
+        'fid_score': fid_score,
+        'is_score': is_score,
+    }, checkpoint_path)
+    
     print(f"Final FID score: {fid_score:.2f}")
+    print(f"Final IS score: {is_score}")
+    print(f"Inception Score: Mean={is_mean}, Std={is_std}")
+    print(f"Model saved to {checkpoint_path}")
