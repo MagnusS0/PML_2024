@@ -22,12 +22,12 @@ class SDEDiffusion(nn.Module):
     
     def marginal_prob_std(self, t):
         """Compute standard deviation of p_{0t}(x(t) | x(0))"""
-        t = torch.tensor(t, device=self.device)
+        t = torch.as_tensor(t, device=self.device)
         return torch.sqrt((self.sigma**(2 * t) - 1.) / 2. / np.log(self.sigma))
     
     def diffusion_coeff(self, t):
         """Compute the diffusion coefficient"""
-        return torch.tensor(self.sigma**t, device=self.device)
+        return torch.as_tensor(self.sigma**t, device=self.device)
     
     def forward(self, x, t):
         """Forward pass of the model"""
@@ -48,7 +48,7 @@ class SDEDiffusion(nn.Module):
             batch_size=shape[0],
             device=self.device
         )
-        return samples  # Already in correct shape from sampler
+        return samples
     
     def loss(self, x):
         """Loss function for training score-based models.
