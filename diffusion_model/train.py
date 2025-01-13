@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import math
 from unet import ScoreNet
 from ddpm import DDPM
+from sde_diffusion import SDEDiffusion
 from ema import ExponentialMovingAverage
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -113,17 +114,25 @@ T = 1000
 learning_rate = 1e-3
 epochs = 100
 batch_size = 256
-
+model_type = "SDE" # SDE or DDPM
 
 # Rather than treating MNIST images as discrete objects, as done in Ho et al 2020, 
 # we here treat them as continuous input data, by dequantizing the pixel values (adding noise to the input data)
 # Also note that we map the 0..255 pixel values to [-1, 1], and that we process the 28x28 pixel values as a flattened 784 tensor.
-transform = transforms.Compose([
-    transforms.ToTensor(), 
-    transforms.Lambda(lambda x: x + torch.rand(x.shape)/255),    # Dequantize pixel values
-    transforms.Lambda(lambda x: (x-0.5)*2.0),                    # Map from [0,1] -> [-1, -1]
-    transforms.Lambda(lambda x: x.flatten())
-])
+if model_type == "DDPM":
+    transform = transforms.Compose([
+        transforms.ToTensor(), 
+        transforms.Lambda(lambda x: x + torch.rand(x.shape)/255),    # Dequantize pixel values
+        transforms.Lambda(lambda x: (x-0.5)*2.0),                    # Map from [0,1] -> [-1, -1]
+        transforms.Lambda(lambda x: x.flatten())
+    ])
+if model_type == "SDE":
+    transform = transforms.Compose([
+        transforms.ToTensor(), 
+        transforms.Lambda(lambda x: x + torch.rand(x.shape)/255),    # Dequantize pixel values
+        transforms.Lambda(lambda x: (x-0.5)*2.0)                     # Map from [0,1] -> [-1, -1]
+    ])
+
 
 # Download and transform train dataset
 dataloader_train = torch.utils.data.DataLoader(datasets.MNIST('./data/mnist_data', download=True, train=True, transform=transform),
@@ -135,15 +144,20 @@ dataloader_train = torch.utils.data.DataLoader(datasets.MNIST('./data/mnist_data
 # Select device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# Construct Unet
-# The original ScoreNet expects a function with std for all the
-# different noise levels, such that the output can be rescaled.
-# Since we are predicting the noise (rather than the score), we
-# ignore this rescaling and just set std=1 for all t.
-mnist_unet = ScoreNet((lambda t: torch.ones(1).to(device)))
+if model_type == "SDE":
+    score_net = ScoreNet(lambda t: torch.ones_like(t))  # Will be replaced by SDE's marginal_prob_std
+    model = SDEDiffusion(score_net).to(device)
 
-# Construct model
-model = DDPM(mnist_unet, T=T, beta_schedule="cosine", loss_type="IS").to(device)
+if model_type == "DDPM":
+    # Construct Unet
+    # The original ScoreNet expects a function with std for all the
+    # different noise levels, such that the output can be rescaled.
+    # Since we are predicting the noise (rather than the score), we
+    # ignore this rescaling and just set std=1 for all t.
+    mnist_unet = ScoreNet((lambda t: torch.ones(1).to(device)))
+
+    # Construct model
+    model = DDPM(mnist_unet, T=T, beta_schedule="cosine", loss_type="IS").to(device)
 
 # Construct optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -154,22 +168,25 @@ scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.9999)
 
 def reporter(model, epoch, writer):
     """Callback function used for plotting images during training"""
-    
-    # Switch to eval mode
     model.eval()
-
     with torch.no_grad():
         nsamples = 10
-        samples = model.sample((nsamples,28*28)).cpu()
+        if model_type == "SDE":
+            samples = model.sample((nsamples, 1, 28, 28)).cpu()
+        else:
+            samples = model.sample((nsamples,28*28)).cpu()
         
         # Map pixel values back from [-1,1] to [0,1]
         samples = (samples+1)/2 
         samples = samples.clamp(0.0, 1.0)
 
         # Log images to TensorBoard
-        grid = utils.make_grid(samples.reshape(-1, 1, 28, 28), nrow=nsamples)
+        if model_type == "SDE":
+            grid = utils.make_grid(samples, nrow=nsamples)
+        else:
+            grid = utils.make_grid(samples.reshape(-1, 1, 28, 28), nrow=nsamples)
         writer.add_image('Generated_Samples', grid, epoch)
-
+        
         # Plot in grid
         plt.gca().set_axis_off()
         plt.imshow(transforms.functional.to_pil_image(grid), cmap="gray")
@@ -182,7 +199,6 @@ def calculate_inception_score(model, dataloader, device, num_samples=128, splits
     """
     # Load InceptionV3 model
     inception_model = inception_v3(pretrained=True, transform_input=False)
-    inception_model.fc = torch.nn.Identity()  # Remove classification head
     inception_model = inception_model.to(device).eval()
 
     # Define transformation for resizing and normalization
@@ -224,7 +240,7 @@ def calculate_inception_score(model, dataloader, device, num_samples=128, splits
 def calculate_fid_and_is(model, dataloader, device, num_samples=512):
     """Calculate FID score between real and generated images."""
     # Initialize FID metric
-    fid = FrechetInceptionDistance(normalize=True).to(device)
+    fid = FrechetInceptionDistance(feature=64, normalize=True).to(device)
     is_score = InceptionScore(normalize=True).to(device)
     
     # Define transformation for resizing

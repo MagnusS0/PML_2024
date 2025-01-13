@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import math
-from loss import elbo_simple, elbo_LDS, elbo_LDS_2, elbo_IS, elbo_simple_pred_x0
+from tqdm import tqdm
+from loss import elbo_simple, elbo_LDS, elbo_LDS_2, elbo_IS
 
 class DDPM(nn.Module):
 
@@ -159,7 +160,7 @@ class DDPM(nn.Module):
         xT = torch.randn(shape).to(self.beta.device)
 
         xt = xT
-        for t in range(self.T, 0, -1):
+        for t in tqdm(range(self.T, 0, -1)):
             noise = torch.randn_like(xT) if t > 1 else 0
             t = torch.tensor(t).expand(xt.shape[0], 1).to(self.beta.device)
             xt = self.reverse_diffusion_constrained(xt, t, noise)
