@@ -114,7 +114,7 @@ T = 1000
 learning_rate = 1e-3
 epochs = 100
 batch_size = 256
-model_type = "SDE" # SDE or DDPM
+model_type = "DDPM" # SDE or DDPM
 
 # Rather than treating MNIST images as discrete objects, as done in Ho et al 2020, 
 # we here treat them as continuous input data, by dequantizing the pixel values (adding noise to the input data)
@@ -193,57 +193,13 @@ def reporter(model, epoch, writer):
         plt.savefig(f"sample_{epoch}.png")
         plt.close()
 
-def calculate_inception_score(model, dataloader, device, num_samples=128, splits=10):
-    """
-    Calculate the Inception Score (IS) for generated images.
-    """
-    # Load InceptionV3 model
-    inception_model = inception_v3(pretrained=True, transform_input=False)
-    inception_model = inception_model.to(device).eval()
+def calculate_fid(model, dataloader, device, num_samples=None):
+    """Calculate FID score between real and generated images"""
+    fid = FrechetInceptionDistance(normalize=True).to(device)
 
-    # Define transformation for resizing and normalization
-    transform = transforms.Compose([
-        transforms.Resize((299, 299)),  # Resize to 299x299 for InceptionV3
-        transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Convert to 3 channels
-    ])
-
-    # Generate fake images
-    model.eval()
-    with torch.no_grad():
-        fake_samples = []
-        for _ in tqdm(range(math.ceil(num_samples / 128)), desc="Generating fake samples"):
-            samples = model.sample((128, 28 * 28))  # Generate fake samples
-            samples = samples.view(-1, 1, 28, 28)  # Reshape to (N, 1, 28, 28)
-            samples = (samples + 1) / 2  # Map from [-1, 1] to [0, 1]
-            samples = torch.stack([transform(img) for img in samples])  # Resize and convert to 3 channels
-            fake_samples.append(samples)
-        fake_samples = torch.cat(fake_samples)[:num_samples].to(device)
-
-    # Extract features from generated images
-    with torch.no_grad():
-        features = inception_model(fake_samples).cpu().numpy()
-
-    # Calculate probabilities using softmax
-    probabilities = softmax(torch.tensor(features), dim=1).numpy()
-
-    # Split data and calculate Inception Score
-    split_scores = []
-    N = probabilities.shape[0]
-    for k in range(splits):
-        part = probabilities[k * (N // splits):(k + 1) * (N // splits), :]
-        p_y = np.mean(part, axis=0)  # Mean probabilities
-        split_scores.append(np.exp(np.mean(np.sum(part * np.log(part / p_y), axis=1))))
-
-    # Return mean and standard deviation of Inception Score
-    return float(np.mean(split_scores)), float(np.std(split_scores))
-
-def calculate_fid_and_is(model, dataloader, device, num_samples=512):
-    """Calculate FID score between real and generated images."""
-    # Initialize FID metric
-    fid = FrechetInceptionDistance(feature=64, normalize=True).to(device)
-    is_score = InceptionScore(normalize=True).to(device)
+    if not num_samples:
+        num_samples = 10000
     
-    # Define transformation for resizing
     transform = transforms.Compose([
         transforms.Resize((299, 299)),  # Resize to 299x299 pixels
     ])
@@ -251,32 +207,61 @@ def calculate_fid_and_is(model, dataloader, device, num_samples=512):
     # Generate fake images
     model.eval()
     with torch.no_grad():
-        fake_samples = []
-        for _ in tqdm(range(math.ceil(num_samples / 128)), desc="Generating fake samples"):
-            samples = model.sample((128, 28 * 28))
-            samples = samples.view(-1, 1, 28, 28)  # Reshape to (N, 1, 28, 28)
+        for real_images, _ in dataloader:
+            batch_size = real_images.shape[0]
+            if isinstance(model, SDEDiffusion):
+                samples = model.sample((batch_size, 28 * 28))
+            else:
+                samples = model.sample((batch_size, 28 * 28))
+                samples = samples.view(-1, 1, 28, 28)  # Reshape to (N, 1, 28, 28)
             samples = (samples + 1) / 2 # Map from [-1, 1] to [0, 1]
             samples = samples.repeat(1, 3, 1, 1)  
             samples = transform(samples)  # Resize to (N, 3, 299, 299)
-            fake_samples.append(samples)
-        fake_samples = torch.cat(fake_samples)[:num_samples]
-        fid.update(fake_samples.to(device), real=False)
-        is_score.update(fake_samples.to(device))
+            fid.update(samples.to(device), real=False)
+            if fid.real_features_num_samples >= num_samples:
+                break
+            # Get real images
+            real_images = real_images.view(-1, 1, 28, 28)  
+            real_images = (real_images + 1) / 2  
+            real_images = real_images.repeat(1, 3, 1, 1)  # Repeat channels to get (N, 3, 28, 28)
+            real_images = transform(real_images) # Resize to (N, 3, 299, 299)
+            fid.update(real_images.to(device), real=True)
 
-    # Process real images
-    for real_images, _ in dataloader:
-        if fid.real_features_num_samples >= num_samples:
-            break
-        real_images = real_images.view(-1, 1, 28, 28)  
-        real_images = (real_images + 1) / 2  
-        real_images = real_images.repeat(1, 3, 1, 1)  # Repeat channels to get (N, 3, 28, 28)
-        real_images = transform(real_images) # Resize to (N, 3, 299, 299)
-        fid.update(real_images.to(device), real=True)
-
-    # Compute FID
+    
     fid_score = fid.compute()
+
+    return float(fid_score)
+
+def calculate_is(model, dataloader, device, num_samples=None, num_steps=10):
+    is_score = InceptionScore(normalize=True).to(device)
+
+    if not num_samples:
+        num_samples = 10000
+
+    transform = transforms.Compose([
+        transforms.Resize((299, 299)),  # Resize to 299x299 pixels
+    ])
+
+    # Generate fake images
+    model.eval()
+    with torch.no_grad():
+        for real_images, _ in dataloader:
+            batch_size = real_images.shape[0]
+            if isinstance(model, SDEDiffusion):
+                samples = model.sample((batch_size, 28 * 28))
+            else:
+                samples = model.sample((batch_size, 28 * 28))
+                samples = samples.view(-1, 1, 28, 28)
+            samples = (samples + 1) / 2
+            samples = samples.repeat(1, 3, 1, 1)
+            samples = transform(samples)
+            is_score.update(samples.to(device))
+        
     is_score = is_score.compute()
-    return float(fid_score), is_score
+    is_mean = is_score[0]
+    is_std = is_score[1]
+
+    return is_mean, is_std
 
 if __name__ == "__main__":
     # Call training loop
@@ -285,8 +270,8 @@ if __name__ == "__main__":
     
     # Calculate and log final metrics
     print("Calculating final metrics...")
-    fid_score, is_score = calculate_fid_and_is(model, dataloader_train, device)
-    is_mean, is_std = calculate_inception_score(model, dataloader_train, device, num_samples=1024, splits=10)
+    fid_score = calculate_fid(model, dataloader_train, device, num_samples=10000)
+    is_mean, is_std = calculate_is(model, dataloader_train, device, num_samples=1024, num_steps=10)
     
     # Log final metrics to TensorBoard
     writer.add_hparams(
@@ -295,7 +280,6 @@ if __name__ == "__main__":
             'FID': fid_score,
             'IS_mean': is_mean,
             'IS_std': is_std,
-            'IS_score': is_score[0]  # Assuming is_score returns a tuple
         }
     )
     
@@ -306,10 +290,8 @@ if __name__ == "__main__":
         'optimizer_state_dict': optimizer.state_dict(),
         'epoch': epochs,
         'fid_score': fid_score,
-        'is_score': is_score,
     }, checkpoint_path)
     
     print(f"Final FID score: {fid_score:.2f}")
-    print(f"Final IS score: {is_score}")
     print(f"Inception Score: Mean={is_mean}, Std={is_std}")
     print(f"Model saved to {checkpoint_path}")

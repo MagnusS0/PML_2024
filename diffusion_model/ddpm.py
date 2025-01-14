@@ -179,7 +179,5 @@ class DDPM(nn.Module):
             return -elbo_LDS_2(self, x0).mean()
         if self.loss_type == 'IS':
             return -elbo_IS(self, x0).mean()
-        if self.loss_type == 'simple_pred_x0':
-            return -elbo_simple_pred_x0(self, x0).mean()
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
