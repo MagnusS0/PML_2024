@@ -1,12 +1,14 @@
 import torch
 import torch.nn as nn
 
-def elbo_simple(self, x0):
+def elbo_simple(model, x0):
     """
     ELBO training objective (Algorithm 1 in Ho et al, 2020)
 
     Parameters
     ----------
+    model: DDPM
+        The DDPM model instance
     x0: torch.tensor
         Input image
 
@@ -15,92 +17,50 @@ def elbo_simple(self, x0):
     float
         ELBO value
     """
-
     # Sample time step t
-    t = torch.randint(0, self.T, (x0.shape[0],1)).to(x0.device)
+    t = torch.randint(0, model.T, (x0.shape[0],1)).to(x0.device)
 
     # Sample noise
     epsilon = torch.randn_like(x0)
 
-    # TODO: Forward diffusion to produce image at step t
-    xt = self.forward_diffusion(x0, t, epsilon)
+    # Forward diffusion to produce image at step t
+    xt = model.forward_diffusion(x0, t, epsilon)
 
-    return -nn.MSELoss(reduction='mean')(epsilon, self.network(xt, t))
+    return -nn.MSELoss(reduction='mean')(epsilon, model.network(xt, t))
 
-def elbo_LDS(self, x0):
+def elbo_LDS(model, x0):
     """
     ELBO training objective with low-discrepancy sampler for discrete timesteps.
-    (adapted from Eq. 14 in "Variational Diffusion Models" by Kingma et al., 2021).
-
-    Parameters
-    ----------
-    x0: torch.tensor
-        Input image (batch_size, num_channels, height, width)
-
-    Returns
-    -------
-    float
-        ELBO value
     """
-
     batch_size = x0.shape[0]
-
-    # Sample random number u0 from U[0,1]
     u0 = torch.rand(1, device=x0.device)
-
-    # Generate low-discrepancy sequence in [0, 1]
+    
     t_continuous = (u0 + torch.arange(batch_size, device=x0.device) / batch_size) % 1.0
-
-    # Map to discrete timesteps [0, T-1] and round
-    # Stochastic Rounding
-    t_frac = t_continuous * self.T  # Scale to [0, T-1]
+    t_frac = t_continuous * model.T
     t_int = torch.floor(t_frac)
     t_prob_up = t_frac - t_int
     t_rand = torch.rand_like(t_prob_up)
     t_discrete = (t_int + (t_rand < t_prob_up).long()).long()
+    t_discrete = t_discrete.unsqueeze(-1)
 
-    t_discrete = t_discrete.unsqueeze(-1)  # (batch_size, 1)
-
-    # Sample noise
     epsilon = torch.randn_like(x0)
+    xt = model.forward_diffusion(x0, t_discrete, epsilon)
 
-    # Forward diffusion
-    xt = self.forward_diffusion(x0, t_discrete, epsilon)
+    return -nn.MSELoss(reduction='mean')(epsilon, model.network(xt, t_discrete))
 
-    # Compute loss
-    return -nn.MSELoss(reduction='mean')(epsilon, self.network(xt, t_discrete))
+def elbo_LDS_2(model, x0):
+    """
+    ELBO training objective with low-discrepancy sampler.
+    """
+    u0 = torch.rand((1,), device=x0.device)
+    batch_size = x0.shape[0]
+    t = ((u0 + torch.arange(batch_size, device=x0.device) / batch_size) % 1) * model.T
+    t = t.long().unsqueeze(1)
 
-def elbo_LDS_2(self, x0): #CAMBIADO
-      """
-      ELBO training objective with low-discrepancy sampler.
+    epsilon = torch.randn_like(x0)
+    xt = model.forward_diffusion(x0, t, epsilon)
 
-      Parameters
-      ----------
-      x0: torch.tensor
-          Input image
-
-      Returns
-      -------
-      float
-          ELBO value
-      """
-
-      # Sample one random number u0 from U[0,1]
-      u0 = torch.rand((1,), device=x0.device)
-
-      # Generate k timesteps (for batch size k) using low-discrepancy sampling
-      batch_size = x0.shape[0]
-      t = ((u0 + torch.arange(batch_size, device=x0.device) / batch_size) % 1) * self.T
-      t = t.long().unsqueeze(1)  # Ensure t is integer and of shape (batch_size, 1)
-
-      # Sample noise
-      epsilon = torch.randn_like(x0)
-
-      # Forward diffusion to produce image at step t
-      xt = self.forward_diffusion(x0, t, epsilon)
-
-      # Compute loss for predicting noise
-      return -nn.MSELoss(reduction='mean')(epsilon, self.network(xt, t))
+    return -nn.MSELoss(reduction='mean')(epsilon, model.network(xt, t))
 
 def weight_function(self, t):
     """
@@ -134,34 +94,33 @@ def update_loss_squared_history(self, t, loss):
             if len(self.loss_squared_history[timestep]) > 10:
                 self.loss_squared_history[timestep].pop(0)
 
-def elbo_IS(self, x0, weight_function=weight_function):
+def elbo_IS(model, x0):
     """
     ELBO training objective with importance sampling.
-
-    Parameters
-    ----------
-    x0: torch.tensor
-        Input image
-
-    Returns
-    -------
-    float
-        ELBO value
     """
-
-    t = torch.randint(1, self.T, (x0.shape[0], 1)).to(x0.device)
-    # Importance weight for each timestep
-    weights = weight_function(self, t.float())
-    weights = weights / weights.sum()  # Normalize weights
+    # t = torch.randint(1, model.T, (x0.shape[0], 1)).to(x0.device)
+    # # Importance weight for each timestep
+    # weights = weight_function(model, t.float())
+    # weights = weights / weights.sum()  # Normalize weights
 
     # Sample noise
+
+    weights = torch.tensor([
+        torch.sqrt(torch.mean(torch.tensor(model.loss_squared_history[t]))) 
+        if len(model.loss_squared_history[t]) > 0 
+        else 1.0 
+        for t in range(1, model.T)
+    ]).to(x0.device)
+    
+    weights = weights / weights.sum()
+    t = torch.multinomial(weights, x0.shape[0], replacement=True).unsqueeze(-1) + 1
+    
     epsilon = torch.randn_like(x0)
-    # Forward diffusion to produce image at step t
-    xt = self.forward_diffusion(x0, t, epsilon)
-    # Compute loss for predicting noise
-    loss = nn.MSELoss(reduction='none')(epsilon, self.network(xt, t))
-    # Update history of L_t^2
-    update_loss_squared_history(self, t, loss)
-    # Apply importance weights
-    loss = (loss.mean(dim=1) * weights.squeeze()).mean()
-    return -loss
+    xt = model.forward_diffusion(x0, t, epsilon)
+    
+    loss = nn.MSELoss(reduction='none')(epsilon, model.network(xt, t))
+    model.update_loss_squared_history(t, loss)
+
+    loss = (loss.mean(dim=1) * weights[t.squeeze() - 1]).mean()
+    
+    return -loss.mean()

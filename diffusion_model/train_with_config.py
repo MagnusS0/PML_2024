@@ -184,11 +184,11 @@ def calculate_fid(model, dataloader, device, num_samples=None):
 
     return float(fid_score)
 
-def calculate_is(model, dataloader, device, num_samples=None, num_steps=10):
+def calculate_is(model, dataloader, device, num_samples=None, num_steps=5):
     is_score = InceptionScore(normalize=True).to(device)
 
     if not num_samples:
-        num_samples = 10000
+        num_samples = 1024
 
     transform = transforms.Compose([
         transforms.Resize((299, 299)),  # Resize to 299x299 pixels
@@ -273,6 +273,11 @@ if __name__ == "__main__":
         'optimizer_state_dict': optimizer.state_dict(),
         'epoch': config.epochs,
         'fid_score': fid_score,
+        'mean_is': is_mean,
+        'std_is': is_std,
+        'model_type': config.model_type,
+        'beta_schedule': config.beta_schedule,
+        'loss_type': config.loss_type
     }, checkpoint_path)
     
     print(f"Final FID score: {fid_score:.2f}")

@@ -51,7 +51,7 @@ class DDPM(nn.Module):
         self.register_buffer("alpha_bar", self.alpha.cumprod(dim=0))
 
     @staticmethod
-    def cosine_variance_schedule(timesteps, s=0.008):
+    def cosine_variance_schedule(timesteps, s=0.002):
         """Cosine schedule from Improved DDPM paper"""
         steps = torch.linspace(0, timesteps, steps=timesteps+1)
         f_t = torch.cos(((steps/timesteps + s)/(1.0 + s)) * math.pi/2.)**2
@@ -181,3 +181,30 @@ class DDPM(nn.Module):
             return -elbo_IS(self, x0).mean()
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+    def weight_function(self, t):
+        """
+        Importance sampling weight function based on E[L_t^2] using a history.
+        """
+        t = t.squeeze().long()
+        weights = []
+        for timestep in t:
+            history = self.loss_squared_history[timestep.item()]
+            if len(history) > 0:
+                weights.append(torch.sqrt(torch.mean(torch.tensor(history))))
+            else:
+                weights.append(torch.tensor(1.0))
+        return torch.tensor(weights, device=t.device)
+
+    def update_loss_squared_history(self, t, loss):
+        """
+        Update the history of L_t^2 for each timestep.
+        """
+        t = t.squeeze().long()
+        loss_squared = loss.mean(dim=1) ** 2
+        for i in range(t.shape[0]):
+            timestep = t[i].item()
+            if timestep in self.loss_squared_history:
+                self.loss_squared_history[timestep].append(loss_squared[i].item())
+                if len(self.loss_squared_history[timestep]) > 10:
+                    self.loss_squared_history[timestep].pop(0)

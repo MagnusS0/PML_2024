@@ -1,10 +1,12 @@
+
+
 import torch
 import torch.nn as nn
 import numpy as np
-from sampling import Euler_Maruyama_sampler
+from sampling import Euler_Maruyama_sampler, ode_sampler
 
 class SDEDiffusion(nn.Module):
-    def __init__(self, network, sigma=25.0):
+    def __init__(self, network, sigma=25.0, sampling_method='euler'):
         """
         Initialize SDE-based Diffusion Model
         
@@ -17,8 +19,11 @@ class SDEDiffusion(nn.Module):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Remove the reshaping wrapper and use direct network
-        self.network = network
+        self.network = network 
         self.network.marginal_prob_std = self.marginal_prob_std
+
+        # Sampling method
+        self.sampling_method = sampling_method
     
     def marginal_prob_std(self, t):
         """Compute standard deviation of p_{0t}(x(t) | x(0))"""
@@ -41,13 +46,22 @@ class SDEDiffusion(nn.Module):
         Args:
             shape: tuple specifying output shape (nsamples, 1, 28, 28)
         """
-        samples = Euler_Maruyama_sampler(
-            self,
-            self.marginal_prob_std,
-            self.diffusion_coeff,
-            batch_size=shape[0],
-            device=self.device
-        )
+        if self.sampling_method == 'euler':
+            samples = Euler_Maruyama_sampler(
+                self,
+                self.marginal_prob_std,
+                self.diffusion_coeff,
+                batch_size=shape[0],
+                device=self.device
+            )
+        elif self.sampling_method == 'ode':
+            samples = ode_sampler(
+                self,
+                self.marginal_prob_std,
+                self.diffusion_coeff,
+                batch_size=shape[0],
+                device=self.device
+            )
         return samples
     
     def loss(self, x):

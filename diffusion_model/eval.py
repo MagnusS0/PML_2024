@@ -201,10 +201,9 @@ def load_model(checkpoint_path, loss_type='simple'):
 
 if __name__ == "__main__":
     configs = [
-        ("./checkpoints/elbo_simple_cosine.pt", "simple"),
-        ("./checkpoints/elbo_lds_cosine.pt", "LDS"),
-        ("./checkpoints/elbo_lds_2_cosine.pt", "LDS_2"),
-        ("./checkpoints/elbo_is_cosine.pt", "IS")
+        # ("./checkpoints/elbo_simple_linear.pt", "simple"),
+        # ("./checkpoints/elbo_LDS_linear.pt", "LDS"),
+        ("./checkpoints/elbo_is_cosine_updated.pt", "IS")
     ]
 
     # Load data
@@ -236,8 +235,8 @@ if __name__ == "__main__":
         avg_nll = total_nll / total_count
         print(f"Average NLL: {avg_nll}")
 
-    # Calculate FID and IS
-    # fid = calculate_fid(model, dataloader_train, 'cuda')
-    # is_mean, is_std = calculate_is(model, dataloader_train, 'cuda')
+        # # Calculate FID and IS
+        # fid = calculate_fid(model, dataloader_train, 'cuda')
+        # is_mean, is_std = calculate_is(model, dataloader_train, 'cuda')
 
-    # print(f"FID: {fid}, IS: {is_mean} +/- {is_std}")
+        # print(f"FID: {fid}, IS: {is_mean} +/- {is_std}")

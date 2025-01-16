@@ -1,7 +1,7 @@
 class Config:
     def __init__(self, T=1000, learning_rate=1e-3, epochs=100, batch_size=256, 
                  model_type="DDPM", beta_schedule="cosine", loss_type="IS",
-                 eval_fid_samples=10000, eval_is_samples=1024, eval_is_splits=10):
+                 eval_fid_samples=10000, eval_is_samples=1024, eval_is_splits=5):
         self.T = T
         self.learning_rate = learning_rate
         self.epochs = epochs
@@ -28,5 +28,5 @@ default_config = {
     "loss_type": "IS",
     "eval_fid_samples": 10000,
     "eval_is_samples": 1024,
-    "eval_is_splits": 10
+    "eval_is_splits": 5
 }

@@ -3,14 +3,10 @@ from torch.amp import autocast, GradScaler
 from torchvision import datasets, transforms, utils
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.inception import InceptionScore
-from torchvision.models import inception_v3
-from torch.nn.functional import softmax
-import numpy as np
 from tqdm.auto import tqdm
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
-import math
 from unet import ScoreNet
 from ddpm import DDPM
 from sde_diffusion import SDEDiffusion
@@ -114,7 +110,7 @@ T = 1000
 learning_rate = 1e-3
 epochs = 100
 batch_size = 256
-model_type = "DDPM" # SDE or DDPM
+model_type = "DDPM" #SDE or DDPM
 
 # Rather than treating MNIST images as discrete objects, as done in Ho et al 2020, 
 # we here treat them as continuous input data, by dequantizing the pixel values (adding noise to the input data)
@@ -146,7 +142,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 if model_type == "SDE":
     score_net = ScoreNet(lambda t: torch.ones_like(t))  # Will be replaced by SDE's marginal_prob_std
-    model = SDEDiffusion(score_net).to(device)
+    model = SDEDiffusion(score_net, sampling_method='ode').to(device)
 
 if model_type == "DDPM":
     # Construct Unet
@@ -236,7 +232,7 @@ def calculate_is(model, dataloader, device, num_samples=None, num_steps=10):
     is_score = InceptionScore(normalize=True).to(device)
 
     if not num_samples:
-        num_samples = 10000
+        num_samples = 1024
 
     transform = transforms.Compose([
         transforms.Resize((299, 299)),  # Resize to 299x299 pixels
@@ -271,7 +267,7 @@ if __name__ == "__main__":
     # Calculate and log final metrics
     print("Calculating final metrics...")
     fid_score = calculate_fid(model, dataloader_train, device, num_samples=10000)
-    is_mean, is_std = calculate_is(model, dataloader_train, device, num_samples=1024, num_steps=10)
+    is_mean, is_std = calculate_is(model, dataloader_train, device, num_samples=1024, num_steps=5)
     
     # Log final metrics to TensorBoard
     writer.add_hparams(
