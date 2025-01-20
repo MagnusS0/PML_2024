@@ -9,7 +9,7 @@ import numpy as np
 def Euler_Maruyama_sampler(score_model, 
                           marginal_prob_std,
                           diffusion_coeff, 
-                          batch_size=64, 
+                          batch_size=256, 
                           num_steps=1000, 
                           device='cuda', 
                           eps=1e-3):
@@ -35,7 +35,7 @@ error_tolerance = 1e-5
 def ode_sampler(score_model,
                 marginal_prob_std,
                 diffusion_coeff,
-                batch_size=64, 
+                batch_size=256, 
                 atol=error_tolerance, 
                 rtol=error_tolerance, 
                 device='cuda', 

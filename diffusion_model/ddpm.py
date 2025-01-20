@@ -29,7 +29,6 @@ class DDPM(nn.Module):
         super(DDPM, self).__init__()
 
         self.loss_type = loss_type
-        self.loss_squared_history = {t: [] for t in range(T)}
 
         # Normalize time input before evaluating neural network
         self._network = network
@@ -50,10 +49,13 @@ class DDPM(nn.Module):
         self.register_buffer("alpha", 1-self.beta)
         self.register_buffer("alpha_bar", self.alpha.cumprod(dim=0))
 
+        self.loss_history_size = 10
+        self.loss_history = []
+
     @staticmethod
-    def cosine_variance_schedule(timesteps, s=0.002):
+    def cosine_variance_schedule(timesteps, s=0.008):
         """Cosine schedule from Improved DDPM paper"""
-        steps = torch.linspace(0, timesteps, steps=timesteps+1)
+        steps = torch.linspace(0, timesteps, steps=timesteps+1, dtype=torch.float32)
         f_t = torch.cos(((steps/timesteps + s)/(1.0 + s)) * math.pi/2.)**2
         alphas = f_t[1:]/f_t[:timesteps]
         betas = torch.clip(1.0 - alphas, 0.0, 0.999)
@@ -182,29 +184,21 @@ class DDPM(nn.Module):
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
 
-    def weight_function(self, t):
-        """
-        Importance sampling weight function based on E[L_t^2] using a history.
-        """
-        t = t.squeeze().long()
-        weights = []
-        for timestep in t:
-            history = self.loss_squared_history[timestep.item()]
-            if len(history) > 0:
-                weights.append(torch.sqrt(torch.mean(torch.tensor(history))))
-            else:
-                weights.append(torch.tensor(1.0))
-        return torch.tensor(weights, device=t.device)
-
     def update_loss_squared_history(self, t, loss):
         """
         Update the history of L_t^2 for each timestep.
         """
         t = t.squeeze().long()
         loss_squared = loss.mean(dim=1) ** 2
-        for i in range(t.shape[0]):
-            timestep = t[i].item()
-            if timestep in self.loss_squared_history:
-                self.loss_squared_history[timestep].append(loss_squared[i].item())
-                if len(self.loss_squared_history[timestep]) > 10:
-                    self.loss_squared_history[timestep].pop(0)
+        for i, t_i in enumerate(t):
+            self.loss_squared_history[t_i.item()].append(loss_squared[i].item())
+
+
+if __name__ == '__main__':
+    # Test the DDPM class
+    from unet import ScoreNet
+    mnist_unet = ScoreNet((lambda t: torch.ones(1).to('cpu')))
+    T = 1000
+    # Construct model
+    model = DDPM(mnist_unet, T=T, beta_schedule="linear", loss_type="IS").to('cpu')
+    print(model)

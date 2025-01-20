@@ -1,4 +1,5 @@
-
+# This i built based on the tutorial by Yang Song et al.
+# https://colab.research.google.com/drive/120kYYBOVa1i0TD85RjlEkFjaWDxSFUx3?usp=sharing
 
 import torch
 import torch.nn as nn
@@ -19,7 +20,7 @@ class SDEDiffusion(nn.Module):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Remove the reshaping wrapper and use direct network
-        self.network = network 
+        self.network = network
         self.network.marginal_prob_std = self.marginal_prob_std
 
         # Sampling method

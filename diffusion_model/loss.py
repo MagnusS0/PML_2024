@@ -62,14 +62,14 @@ def elbo_LDS_2(model, x0):
 
     return -nn.MSELoss(reduction='mean')(epsilon, model.network(xt, t))
 
-def weight_function(self, t):
+def weight_function(model, t):
     """
     Importance sampling weight function based on E[L_t^2] using a history.
     """
     t = t.squeeze().long()
     weights = []
     for timestep in t:
-        history = self.loss_squared_history[timestep.item()]
+        history = model.loss_squared_history[timestep.item()]
         if len(history) > 0:
             # Compute E[L_t^2] as the mean of the last 10 values
             weights.append(torch.sqrt(torch.mean(torch.tensor(history))))
@@ -78,49 +78,50 @@ def weight_function(self, t):
             weights.append(torch.tensor(1.0))
     return torch.tensor(weights, device=t.device)
 
-def update_loss_squared_history(self, t, loss):
-    """
-    Update the history of L_t^2 for each timestep.
-    """
-    t = t.squeeze().long()
-    # Calculate L_t^2 for the given timesteps
-    loss_squared = loss.mean(dim=1) ** 2  # Mean over batch dimension
-    for i in range(t.shape[0]):
-        timestep = t[i].item()
-        if timestep in self.loss_squared_history:
-            # Update the history with a new value
-            self.loss_squared_history[timestep].append(loss_squared[i].item())
-            # Keep only the last 10 values
-            if len(self.loss_squared_history[timestep]) > 10:
-                self.loss_squared_history[timestep].pop(0)
 
 def elbo_IS(model, x0):
     """
-    ELBO training objective with importance sampling.
+    ELBO training objective with importance sampling of time steps and moving average of loss.
+
+    Parameters
+    ----------
+    x0: torch.tensor
+        Input image
+
+    Returns
+    -------
+    float
+        ELBO value
     """
-    # t = torch.randint(1, model.T, (x0.shape[0], 1)).to(x0.device)
-    # # Importance weight for each timestep
-    # weights = weight_function(model, t.float())
-    # weights = weights / weights.sum()  # Normalize weights
 
-    # Sample noise
+    # Sample time step t with importance sampling
+    if not hasattr(model, "importance_weights"):
+        alpha_bar_prev = torch.cat([torch.tensor([1.0]).to(model.alpha_bar.device), model.alpha_bar[:-1]])
+        model.importance_weights = (alpha_bar_prev - model.alpha_bar) / (model.alpha * (1 - model.alpha_bar))
+        model.importance_weights /= model.importance_weights.sum()
+    
+    t = torch.multinomial(model.importance_weights, num_samples=x0.shape[0], replacement=True).unsqueeze(-1).to(x0.device)
 
-    weights = torch.tensor([
-        torch.sqrt(torch.mean(torch.tensor(model.loss_squared_history[t]))) 
-        if len(model.loss_squared_history[t]) > 0 
-        else 1.0 
-        for t in range(1, model.T)
-    ]).to(x0.device)
-    
-    weights = weights / weights.sum()
-    t = torch.multinomial(weights, x0.shape[0], replacement=True).unsqueeze(-1) + 1
-    
     epsilon = torch.randn_like(x0)
-    xt = model.forward_diffusion(x0, t, epsilon)
-    
-    loss = nn.MSELoss(reduction='none')(epsilon, model.network(xt, t))
-    model.update_loss_squared_history(t, loss)
 
-    loss = (loss.mean(dim=1) * weights[t.squeeze() - 1]).mean()
-    
-    return -loss.mean()
+    # Forward diffusion to produce image at step t
+    xt = model.forward_diffusion(x0, t, epsilon)
+
+    losses = nn.MSELoss(reduction='none')(epsilon, model.network(xt, t)).mean(dim=list(range(1, len(x0.shape))))
+
+    # Calculate the importance weights for each sample
+    sample_weights = 1 / (model.T * model.importance_weights[t].squeeze())
+
+    # Update loss history and compute moving average
+    if len(model.loss_history) == model.loss_history_size:
+        model.loss_history.pop(0)
+    model.loss_history.append(losses.detach().cpu())
+
+    if len(model.loss_history) > 1:
+        avg_losses = torch.stack(model.loss_history).mean(dim=0)
+        # Normalize and invert to get new importance weights
+        new_importance_weights = 1 / avg_losses
+        new_importance_weights /= new_importance_weights.sum()
+        model.importance_weights = new_importance_weights.to(model.importance_weights.device)
+
+    return -(losses * sample_weights).mean()

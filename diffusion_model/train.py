@@ -102,8 +102,7 @@ def train(model, optimizer, scheduler, dataloader, epochs, device, ema=True, per
             per_epoch_callback(ema_model.module if ema else model, epoch, writer)
 
     writer.close()
-    return writer  # Return writer for final metrics logging
-
+    return writer, ema_model.module if ema else model
 
 # Parameters
 T = 1000
@@ -135,14 +134,21 @@ dataloader_train = torch.utils.data.DataLoader(datasets.MNIST('./data/mnist_data
                                                 batch_size=batch_size,
                                                 num_workers=4,
                                                 pin_memory=True,
-                                                shuffle=True)
+                                                shuffle=True,
+                                                drop_last=True)
+
+dataloader_test = torch.utils.data.DataLoader(datasets.MNIST('./data/mnist_data', download=True, train=True, transform=transform),
+                                                batch_size=1024,
+                                                num_workers=4,
+                                                pin_memory=True,
+                                                shuffle=False)
 
 # Select device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 if model_type == "SDE":
     score_net = ScoreNet(lambda t: torch.ones_like(t))  # Will be replaced by SDE's marginal_prob_std
-    model = SDEDiffusion(score_net, sampling_method='ode').to(device)
+    model = SDEDiffusion(score_net, sampling_method='euler').to(device)
 
 if model_type == "DDPM":
     # Construct Unet
@@ -153,7 +159,7 @@ if model_type == "DDPM":
     mnist_unet = ScoreNet((lambda t: torch.ones(1).to(device)))
 
     # Construct model
-    model = DDPM(mnist_unet, T=T, beta_schedule="cosine", loss_type="IS").to(device)
+    model = DDPM(mnist_unet, T=T, beta_schedule="linear", loss_type="IS").to(device)
 
 # Construct optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -217,7 +223,8 @@ def calculate_fid(model, dataloader, device, num_samples=None):
             if fid.real_features_num_samples >= num_samples:
                 break
             # Get real images
-            real_images = real_images.view(-1, 1, 28, 28)  
+            if isinstance(model, DDPM):
+                real_images = real_images.view(-1, 28 * 28)
             real_images = (real_images + 1) / 2  
             real_images = real_images.repeat(1, 3, 1, 1)  # Repeat channels to get (N, 3, 28, 28)
             real_images = transform(real_images) # Resize to (N, 3, 299, 299)
@@ -261,26 +268,26 @@ def calculate_is(model, dataloader, device, num_samples=None, num_steps=10):
 
 if __name__ == "__main__":
     # Call training loop
-    writer = train(model, optimizer, scheduler, dataloader_train,
+    writer, model = train(model, optimizer, scheduler, dataloader_train,
         epochs=epochs, device=device, per_epoch_callback=reporter)
     
     # Calculate and log final metrics
     print("Calculating final metrics...")
-    fid_score = calculate_fid(model, dataloader_train, device, num_samples=10000)
-    is_mean, is_std = calculate_is(model, dataloader_train, device, num_samples=1024, num_steps=5)
+    fid_score = calculate_fid(model, dataloader_test, device, num_samples=10000)
+    #is_mean, is_std = calculate_is(model, dataloader_train, device, num_samples=1024, num_steps=5)
     
     # Log final metrics to TensorBoard
     writer.add_hparams(
         {'learning_rate': learning_rate, 'epochs': epochs, 'batch_size': batch_size},
         {
             'FID': fid_score,
-            'IS_mean': is_mean,
-            'IS_std': is_std,
+           # 'IS_mean': is_mean,
+            #'IS_std': is_std,
         }
     )
     
     # Save final model
-    checkpoint_path = os.path.join(checkpoint_dir, f'model_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
+    checkpoint_path = os.path.join(checkpoint_dir, f'model_ema{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -289,5 +296,5 @@ if __name__ == "__main__":
     }, checkpoint_path)
     
     print(f"Final FID score: {fid_score:.2f}")
-    print(f"Inception Score: Mean={is_mean}, Std={is_std}")
+   # print(f"Inception Score: Mean={is_mean}, Std={is_std}")
     print(f"Model saved to {checkpoint_path}")
